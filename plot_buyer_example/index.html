@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Crowdlands - Cadastre Real Estate Game</title>
+  <meta name="description" content="Buy, develop, and trade real land parcels across NSW Australia powered by live cadastre spatial data and MapLibre GL." />
+  
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+
+  <!-- MapLibre GL JS & CSS -->
+  <script src="https://unpkg.com/maplibre-gl@3.6.0/dist/maplibre-gl.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@3.6.0/dist/maplibre-gl.css" rel="stylesheet" />
+
+  <!-- App Custom Styles -->
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- Main Map Container -->
+  <div id="map"></div>
+
+  <!-- Top Navigation & Game HUD Header -->
+  <header class="app-header">
+    <div class="brand-section">
+      <span class="brand-logo">🏙️</span>
+      <div class="brand-title">CROWDLANDS</div>
+      <span class="brand-badge">NSW Cadastre</span>
+    </div>
+
+    <!-- HUD Stats -->
+    <div class="hud-stats">
+      <div class="stat-card">
+        <div class="stat-label"><i class="fa-solid fa-wallet"></i> Cash Balance</div>
+        <div class="stat-value primary" id="hud-balance">$10,000,000</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label"><i class="fa-solid fa-chart-line"></i> Rent Income</div>
+        <div class="stat-value success" id="hud-income">$0 <span class="income-pulse">/sec</span></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label"><i class="fa-solid fa-gem"></i> Net Worth</div>
+        <div class="stat-value gold" id="hud-networth">$10,000,000</div>
+      </div>
+    </div>
+
+    <!-- Header Action Buttons -->
+    <div class="header-actions">
+      <button class="btn-hud" id="btn-toggle-portfolio" title="View Portfolio">
+        <i class="fa-solid fa-building-user"></i> <span>Portfolio</span>
+      </button>
+      <button class="btn-hud" id="btn-toggle-leaderboard" title="Leaderboard">
+        <i class="fa-solid fa-trophy"></i> <span>Rivals</span>
+      </button>
+      <button class="btn-hud" id="btn-toggle-basemap" title="Change Basemap Style">
+        <i class="fa-solid fa-layer-group"></i>
+      </button>
+      <button class="btn-hud" id="btn-toggle-audio" title="Mute/Unmute Audio">
+        <i class="fa-solid fa-volume-high" id="audio-icon"></i>
+      </button>
+      <button class="btn-hud" id="btn-reset-game" title="Reset Game Progress">
+        <i class="fa-solid fa-rotate-left"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- Search Bar with Nominatim Geocoding -->
+  <div class="search-container">
+    <div class="search-box">
+      <i class="fa-solid fa-magnifying-glass" style="color: var(--text-muted);"></i>
+      <input type="text" id="search-input" class="search-input" placeholder="Search NSW suburb or address..." autocomplete="off" />
+      <i class="fa-solid fa-spinner fa-spin" id="search-spinner" style="display:none; color: var(--primary);"></i>
+    </div>
+    <div class="search-results" id="search-results"></div>
+  </div>
+
+  <!-- Location Presets Toolbar -->
+  <div class="location-presets">
+    <button class="preset-btn" data-lng="151.2093" data-lat="-33.8688">Sydney CBD</button>
+    <button class="preset-btn" data-lng="151.2153" data-lat="-33.8568">Circular Quay</button>
+    <button class="preset-btn" data-lng="151.0011" data-lat="-33.8150">Parramatta</button>
+    <button class="preset-btn" data-lng="151.2743" data-lat="-33.8915">Bondi Beach</button>
+    <button class="preset-btn" data-lng="151.7789" data-lat="-32.9283">Newcastle</button>
+  </div>
+
+  <!-- Zoom Warning Toast -->
+  <div class="zoom-warning" id="zoom-warning">
+    <i class="fa-solid fa-circle-info" style="color: var(--warning);"></i>
+    <span>Zoom in closer to view and trade land parcels</span>
+    <button class="btn-zoom-in" id="btn-zoom-in">Zoom In</button>
+  </div>
+
+  <!-- Parcel Inspector Card -->
+  <div class="parcel-card" id="parcel-card">
+    <div class="parcel-card-header">
+      <div class="parcel-title-group">
+        <div class="parcel-lot" id="card-lot-number">Lot 1</div>
+        <div class="parcel-plan" id="card-plan-label">DP598704</div>
+      </div>
+      <button class="btn-close" id="btn-close-card"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+
+    <div class="parcel-status-badge status-unclaimed" id="card-status-badge">
+      <i class="fa-solid fa-tag"></i> <span id="card-status-text">Available For Purchase</span>
+    </div>
+
+    <div class="parcel-grid">
+      <div class="parcel-grid-item">
+        <div class="grid-label">Land Area</div>
+        <div class="grid-value" id="card-area">0 m²</div>
+      </div>
+      <div class="parcel-grid-item">
+        <div class="grid-label">Property Value</div>
+        <div class="grid-value" id="card-price">$0</div>
+      </div>
+      <div class="parcel-grid-item">
+        <div class="grid-label">Current Owner</div>
+        <div class="grid-value" id="card-owner">Unclaimed</div>
+      </div>
+      <div class="parcel-grid-item">
+        <div class="grid-label">Rent Revenue</div>
+        <div class="grid-value" style="color: var(--success);" id="card-yield">$0 / sec</div>
+      </div>
+    </div>
+
+    <!-- Development Options (When Owned) -->
+    <div class="development-section" id="development-section">
+      <div class="section-subtitle">Structure Development</div>
+      <div class="building-select-grid">
+        <div class="building-option selected" data-type="vacant">
+          <div class="b-icon">🏞️</div>
+          <div class="b-name">Vacant</div>
+          <div class="b-cost">$0</div>
+          <div class="b-yield">+1x</div>
+        </div>
+        <div class="building-option" data-type="residential">
+          <div class="b-icon">🏠</div>
+          <div class="b-name">Apartments</div>
+          <div class="b-cost">$25k</div>
+          <div class="b-yield">+3x</div>
+        </div>
+        <div class="building-option" data-type="commercial">
+          <div class="b-icon">🏢</div>
+          <div class="b-name">Office Tower</div>
+          <div class="b-cost">$100k</div>
+          <div class="b-yield">+8x</div>
+        </div>
+      </div>
+    </div>
+
+    <button class="btn-action-primary" id="btn-buy-parcel">
+      <i class="fa-solid fa-cart-shopping"></i> <span>Buy Parcel</span>
+    </button>
+    <button class="btn-action-secondary" id="btn-sell-parcel" style="display: none;">
+      <i class="fa-solid fa-hand-holding-dollar"></i> Sell Property
+    </button>
+  </div>
+
+  <!-- Portfolio Side Drawer -->
+  <aside class="drawer-panel" id="portfolio-drawer">
+    <div class="drawer-header">
+      <div class="drawer-title"><i class="fa-solid fa-building-user" style="color: var(--primary);"></i> My Portfolio</div>
+      <button class="btn-close" id="btn-close-portfolio"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div class="drawer-content">
+      <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: var(--radius-md); margin-bottom: 16px; border: 1px solid var(--border-color);">
+        <div style="display:flex; justify-between; margin-bottom: 6px;">
+          <span style="color: var(--text-muted); font-size: 13px;">Properties Owned:</span>
+          <strong id="portfolio-count" style="color: var(--primary);">0</strong>
+        </div>
+        <div style="display:flex; justify-between;">
+          <span style="color: var(--text-muted); font-size: 13px;">Total Land Owned:</span>
+          <strong id="portfolio-total-area" style="color: var(--success);">0 m²</strong>
+        </div>
+      </div>
+      <div id="portfolio-list">
+        <!-- Dynamic property items inserted here -->
+      </div>
+    </div>
+  </aside>
+
+  <!-- Leaderboard Side Drawer -->
+  <aside class="drawer-panel" id="leaderboard-drawer">
+    <div class="drawer-header">
+      <div class="drawer-title"><i class="fa-solid fa-trophy" style="color: var(--warning);"></i> Real Estate Moguls</div>
+      <button class="btn-close" id="btn-close-leaderboard"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div class="drawer-content" id="leaderboard-list">
+      <!-- Dynamic leaderboard items -->
+    </div>
+  </aside>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- Application Logic -->
+  <script src="app.js"></script>
+</body>
+</html>

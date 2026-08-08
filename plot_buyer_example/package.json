@@ -1,0 +1,13 @@
+{
+  "name": "crowdlands",
+  "version": "1.0.0",
+  "description": "Cadastre Real Estate Game powered by NSW Spatial Services & MapLibre GL",
+  "main": "app.js",
+  "scripts": {
+    "start": "npx -y serve -l 3000 .",
+    "dev": "npx -y serve -l 3000 ."
+  },
+  "dependencies": {
+    "maplibre-gl": "^3.6.0"
+  }
+}
