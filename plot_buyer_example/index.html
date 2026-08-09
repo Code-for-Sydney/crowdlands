@@ -18,6 +18,9 @@
   <script src="https://unpkg.com/maplibre-gl@3.6.0/dist/maplibre-gl.js"></script>
   <link href="https://unpkg.com/maplibre-gl@3.6.0/dist/maplibre-gl.css" rel="stylesheet" />
 
+  <!-- Turf.js for geospatial operations -->
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
   <!-- App Custom Styles -->
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -60,6 +63,9 @@
       </button>
       <button class="btn-hud" id="btn-toggle-basemap" title="Change Basemap Style">
         <i class="fa-solid fa-layer-group"></i>
+      </button>
+      <button class="btn-hud" id="btn-toggle-heatmap" title="Toggle Price Heatmap">
+        <i class="fa-solid fa-fire"></i>
       </button>
       <button class="btn-hud" id="btn-toggle-audio" title="Mute/Unmute Audio">
         <i class="fa-solid fa-volume-high" id="audio-icon"></i>
@@ -129,27 +135,56 @@
       </div>
     </div>
 
-    <!-- Development Options (When Owned) -->
+    <!-- Development Section -->
     <div class="development-section" id="development-section">
-      <div class="section-subtitle">Structure Development</div>
-      <div class="building-select-grid">
-        <div class="building-option selected" data-type="vacant">
+      <div class="section-subtitle" id="dev-section-title">Structure Development</div>
+
+      <!-- Development template chooser -->
+      <div class="building-select-grid" id="development-options">
+        <div class="building-option" data-template="vacant">
           <div class="b-icon">🏞️</div>
           <div class="b-name">Vacant</div>
-          <div class="b-cost">$0</div>
-          <div class="b-yield">+1x</div>
+          <div class="b-floors">0 floors</div>
+          <div class="b-cost">Free</div>
+          <div class="b-time">Instant</div>
         </div>
-        <div class="building-option" data-type="residential">
+        <div class="building-option" data-template="apartmentblock">
           <div class="b-icon">🏠</div>
-          <div class="b-name">Apartments</div>
+          <div class="b-name">Apartment Block</div>
+          <div class="b-floors">5 floors</div>
           <div class="b-cost">$25k</div>
-          <div class="b-yield">+3x</div>
+          <div class="b-time">10s</div>
         </div>
-        <div class="building-option" data-type="commercial">
+        <div class="building-option" data-template="officetower">
           <div class="b-icon">🏢</div>
           <div class="b-name">Office Tower</div>
+          <div class="b-floors">20 floors</div>
           <div class="b-cost">$100k</div>
-          <div class="b-yield">+8x</div>
+          <div class="b-time">40s</div>
+        </div>
+      </div>
+
+      <!-- Planner / Construction UI -->
+      <div id="development-planner" style="display:none;">
+        <div class="planner-header">
+          <span class="planner-title" id="planner-title">Highrise</span>
+          <span class="planner-status" id="planner-status">Planning</span>
+        </div>
+        <div class="floor-stack" id="floor-stack"></div>
+        <div class="planner-controls">
+          <button class="btn-icon-small" id="btn-add-floor"><i class="fa-solid fa-plus"></i> Floor</button>
+          <button class="btn-icon-small" id="btn-remove-floor"><i class="fa-solid fa-minus"></i> Floor</button>
+        </div>
+        <div class="planner-summary" id="planner-summary"></div>
+        <div class="planner-actions">
+          <button class="btn-action-primary" id="btn-start-construction"><i class="fa-solid fa-hammer"></i> Start Construction</button>
+          <button class="btn-action-secondary" id="btn-cancel-planning">Cancel</button>
+        </div>
+        <div class="construction-status" id="construction-status" style="display: none;">
+          <div class="progress-bar">
+            <div class="progress-fill" id="construction-progress"></div>
+          </div>
+          <div class="construction-time" id="construction-time"></div>
         </div>
       </div>
     </div>
@@ -198,6 +233,58 @@
 
   <!-- Toast Container -->
   <div class="toast-container" id="toast-container"></div>
+
+  <!-- Merge Proposal Modal -->
+  <div class="modal-overlay" id="merge-modal" style="display:none;">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <div class="modal-title"><i class="fa-solid fa-object-group" style="color: var(--primary);"></i> Merge Adjacent Parcels</div>
+        <button class="btn-close" id="btn-close-merge"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="modal-body" id="merge-modal-body">
+        <!-- Dynamic content -->
+      </div>
+      <div class="modal-actions" id="merge-modal-actions">
+        <button class="btn-action-primary" id="btn-confirm-merge"><i class="fa-solid fa-object-group"></i> Merge Parcels</button>
+        <button class="btn-action-secondary" id="btn-decline-merge">Not Now</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Deconstruction Progress Floating Status -->
+  <div class="floating-status" id="deconstruct-modal" style="display:none;">
+    <div class="floating-status-header">
+      <span><i class="fa-solid fa-trowel-bricks" style="color: var(--warning);"></i> Deconstructing Buildings</span>
+      <button class="btn-close" id="btn-close-deconstruct"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div class="floating-status-body" id="deconstruct-modal-body">
+      <!-- Dynamic content -->
+    </div>
+    <div class="construction-status" style="margin-top:10px;">
+      <div class="progress-bar">
+        <div class="progress-fill" id="deconstruct-progress"></div>
+      </div>
+      <div class="construction-time" id="deconstruct-time"></div>
+    </div>
+  </div>
+
+  <!-- Block Split Designer Modal -->
+  <div class="modal-overlay" id="split-modal" style="display:none;">
+    <div class="modal-panel modal-wide">
+      <div class="modal-header">
+        <div class="modal-title"><i class="fa-solid fa-scissors" style="color: var(--danger);"></i> Split Block</div>
+        <button class="btn-close" id="btn-close-split"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-hint">Click two points on the block boundary to draw a straight split line. The line must start and end on the outer boundary.</p>
+        <div class="split-designer" id="split-designer"></div>
+        <div class="split-actions">
+          <button class="btn-action-secondary" id="btn-reset-split">Reset Line</button>
+          <button class="btn-action-primary" id="btn-confirm-split"><i class="fa-solid fa-check"></i> Split Block</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Application Logic -->
   <script src="app.js"></script>
