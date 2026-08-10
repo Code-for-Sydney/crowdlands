@@ -1030,6 +1030,20 @@
     map.setFeatureState({ source: 'player-blocks', id: blockId }, { selected: true });
   }
 
+  function clearParcelSelection() {
+    if (selectedParcelId !== null && map) {
+      map.setFeatureState({ source: 'nsw-cadastre', id: selectedParcelId }, { selected: false });
+      selectedParcelId = null;
+    }
+  }
+
+  function setParcelSelection(featureId) {
+    if (!map) return;
+    clearParcelSelection();
+    selectedParcelId = featureId;
+    map.setFeatureState({ source: 'nsw-cadastre', id: featureId }, { selected: true });
+  }
+
   function updatePendingDeconLayer() {
     if (!map) return;
     const source = map.getSource('pending-decon');
@@ -1061,6 +1075,7 @@
   let selectedParcel = null;
   let selectedBlock = null;
   let selectedBlockId = null;
+  let selectedParcelId = null;
   let currentSplitBlock = null;
   let currentMergeProposals = []; // { type:'group'|'expand', cadids:[], features?:[], block?, parcelCadid?, parcelFeature?, needsDecon:bool }
   let hoveredParcelId = null;
@@ -1327,12 +1342,38 @@
         });
       }
 
+      if (!map.getLayer('cadastre-selected')) {
+        map.addLayer({
+          id: 'cadastre-selected',
+          type: 'line',
+          source: 'nsw-cadastre',
+          filter: ['!=', ['get', 'inBlock'], true],
+          paint: {
+            'line-color': '#ffffff',
+            'line-width': 5,
+            'line-opacity': [
+              'case',
+              ['boolean', ['feature-state', 'selected'], false], 1,
+              0
+            ]
+          }
+        });
+      }
+
       if (currentLoadedFeatures.length > 0) {
         applyFeatureOwnershipStates();
       }
 
       initBlockLayers();
       updateBlockLayer();
+
+      // Restore selection highlights after a style change rebuilds layers.
+      if (selectedParcelId !== null && map) {
+        map.setFeatureState({ source: 'nsw-cadastre', id: selectedParcelId }, { selected: true });
+      }
+      if (selectedBlockId !== null && map) {
+        map.setFeatureState({ source: 'player-blocks', id: selectedBlockId }, { selected: true });
+      }
     }
 
     map.on('load', () => {
@@ -1595,8 +1636,10 @@
     selectedBlock = block || null;
     if (selectedBlock) {
       setBlockSelection(selectedBlock.id);
+      clearParcelSelection();
     } else {
       clearBlockSelection();
+      setParcelSelection(feature.id);
     }
 
     const prop = isOwnedByPlayer
@@ -2365,6 +2408,7 @@
     document.getElementById('btn-close-card').addEventListener('click', () => {
       document.getElementById('parcel-card').classList.remove('active');
       clearBlockSelection();
+      clearParcelSelection();
     });
 
     // Modal close buttons
