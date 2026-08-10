@@ -155,22 +155,57 @@
     return 'unclaimed';
   }
 
+  function bboxOverlap(coordsA, coordsB) {
+    const ringA = coordsA[0];
+    const ringB = coordsB[0];
+    let minAx = Infinity, maxAx = -Infinity, minAy = Infinity, maxAy = -Infinity;
+    let minBx = Infinity, maxBx = -Infinity, minBy = Infinity, maxBy = -Infinity;
+    for (let i = 0; i < ringA.length; i++) {
+      const c = ringA[i];
+      if (c[0] < minAx) minAx = c[0];
+      if (c[0] > maxAx) maxAx = c[0];
+      if (c[1] < minAy) minAy = c[1];
+      if (c[1] > maxAy) maxAy = c[1];
+    }
+    for (let i = 0; i < ringB.length; i++) {
+      const c = ringB[i];
+      if (c[0] < minBx) minBx = c[0];
+      if (c[0] > maxBx) maxBx = c[0];
+      if (c[1] < minBy) minBy = c[1];
+      if (c[1] > maxBy) maxBy = c[1];
+    }
+    return maxAx >= minBx && maxBx >= minAx && maxAy >= minBy && maxBy >= minAy;
+  }
+
   function polygonsShareEdge(coordsA, coordsB) {
     // coords are Polygon coordinates arrays [outerRing, ...holes]
+    // Fast exact-edge check first.
     const ringA = coordsA[0];
     const ringB = coordsB[0];
     const edgesA = new Set();
     for (let i = 0; i < ringA.length - 1; i++) {
-      const a = ringA[i];
-      const b = ringA[i + 1];
-      edgesA.add(edgeKey(a, b));
+      edgesA.add(edgeKey(ringA[i], ringA[i + 1]));
     }
     for (let i = 0; i < ringB.length - 1; i++) {
-      const a = ringB[i];
-      const b = ringB[i + 1];
-      if (edgesA.has(edgeKey(a, b)) || edgesA.has(edgeKey(b, a))) return true;
+      if (edgesA.has(edgeKey(ringB[i], ringB[i + 1])) || edgesA.has(edgeKey(ringB[i + 1], ringB[i]))) return true;
     }
-    return false;
+
+    // Robust fallback: if bounding boxes don't overlap, they can't share an edge.
+    if (!bboxOverlap(coordsA, coordsB)) return false;
+
+    // Two parcels are adjacent when their intersection is a line segment
+    // (not just a corner point and not an overlap). This handles shared edges
+    // that have different intermediate vertices.
+    try {
+      const polyA = turf.polygon(coordsA);
+      const polyB = turf.polygon(coordsB);
+      const intersection = turf.intersect(polyA, polyB);
+      if (!intersection || !intersection.geometry) return false;
+      const type = intersection.geometry.type;
+      return type === 'LineString' || type === 'MultiLineString';
+    } catch (e) {
+      return false;
+    }
   }
 
   function edgeKey(a, b) {
@@ -265,10 +300,28 @@
 
   function createBlockFromCadids(cadids) {
     const originalParcels = {};
+    const memberGeometries = {};
     let totalArea = 0;
     let totalPrice = 0;
     let lotNumbers = [];
     let planLabels = [];
+
+    // If any cadids belong to existing blocks, dissolve those blocks first so
+    // all parcels can be combined into one new block.
+    const blocksToDissolve = new Map();
+    cadids.forEach(cid => {
+      const block = getBlockForCadid(cid);
+      if (block) blocksToDissolve.set(block.id, block);
+    });
+    blocksToDissolve.forEach(block => {
+      Object.entries(block.originalParcels).forEach(([cid, parcel]) => {
+        gameState.ownedParcels[parseInt(cid)] = parcel;
+      });
+      Object.entries(block.memberGeometries || {}).forEach(([cid, geom]) => {
+        memberGeometries[parseInt(cid)] = geom;
+      });
+      delete gameState.ownedBlocks[block.id];
+    });
 
     cadids.forEach(cid => {
       const parcel = gameState.ownedParcels[cid];
@@ -282,16 +335,27 @@
       }
     });
 
+    // Pull any member geometries we don't already have from the current view.
+    const memberFeatures = currentLoadedFeatures.filter(f => cadids.includes(parseInt(f.properties.cadid)));
+    memberFeatures.forEach(f => {
+      const cid = parseInt(f.properties.cadid);
+      if (!memberGeometries[cid]) memberGeometries[cid] = f.geometry;
+    });
+
+    const geometry = unionFeatureGeometries(cadids.map(cid => memberGeometries[cid] ? { geometry: memberGeometries[cid] } : null).filter(Boolean));
+
     const blockId = generateBlockId();
     const block = {
       id: blockId,
       cadids: cadids.map(id => parseInt(id)),
       originalParcels,
+      memberGeometries,
       area: totalArea,
       price: totalPrice,
       development: { status: 'complete', floors: [] },
       purchaseDate: new Date().toISOString(),
-      label: `Block (${cadids.length} lots)`
+      label: `Block (${cadids.length} lots)`,
+      geometry: geometry
     };
 
     gameState.ownedBlocks[blockId] = block;
@@ -348,39 +412,53 @@
     return false;
   }
 
-  function showMergeProposalModal(group) {
-    const cadids = group.map(f => parseInt(f.properties.cadid));
-    currentMergeCadids = cadids;
-    currentExpandBlock = null;
-    currentExpandParcelCadid = null;
+  function showMergeProposalsModal(proposals) {
+    currentMergeProposals = proposals;
 
     const modal = document.getElementById('merge-modal');
     const body = document.getElementById('merge-modal-body');
 
-    const totalArea = group.reduce((sum, f) => sum + (f.properties.area || 0), 0);
-    const combinedValue = group.reduce((sum, f) => sum + calculateParcelPrice(f.properties.area || 0), 0);
+    const renderGroup = (p, idx) => {
+      const totalArea = p.features.reduce((sum, f) => sum + (f.properties.area || 0), 0);
+      const combinedValue = p.features.reduce((sum, f) => sum + calculateParcelPrice(f.properties.area || 0), 0);
+      const listItems = p.features.map(f => {
+        const prop = gameState.ownedParcels[f.properties.cadid];
+        const floors = prop && prop.development && prop.development.floors ? prop.development.floors.length : 0;
+        return `<li><strong>Lot ${f.properties.lotnumber}</strong> (${f.properties.planlabel}) — ${f.properties.area?.toLocaleString()} m² ${floors > 0 ? `• ${floors} floors` : ''}</li>`;
+      }).join('');
+      return `
+        <div class="merge-proposal">
+          <label class="merge-proposal-header">
+            <input type="checkbox" class="merge-proposal-check" data-index="${idx}" checked>
+            <span>New block — ${p.features.length} lots — ${totalArea.toLocaleString()} m² — $${combinedValue.toLocaleString()}</span>
+          </label>
+          <ul class="merge-parcel-list">${listItems}</ul>
+          ${p.needsDecon ? '<div class="merge-note"><i class="fa-solid fa-triangle-exclamation"></i> Existing buildings must be deconstructed before merging.</div>' : ''}
+        </div>
+      `;
+    };
 
-    const listItems = group.map(f => {
-      const prop = gameState.ownedParcels[f.properties.cadid];
-      const floors = prop && prop.development && prop.development.floors ? prop.development.floors.length : 0;
-      return `<li><strong>Lot ${f.properties.lotnumber}</strong> (${f.properties.planlabel}) — ${f.properties.area?.toLocaleString()} m² ${floors > 0 ? `• ${floors} floors` : ''}</li>`;
-    }).join('');
+    const renderExpand = (p, idx) => {
+      const parcel = gameState.ownedParcels[p.parcelCadid];
+      return `
+        <div class="merge-proposal">
+          <label class="merge-proposal-header">
+            <input type="checkbox" class="merge-proposal-check" data-index="${idx}" checked>
+            <span>Expand ${p.block.label} with Lot ${p.parcelFeature.properties.lotnumber} (${p.parcelFeature.properties.planlabel}) — ${(p.block.area + p.parcelFeature.properties.area).toLocaleString()} m²</span>
+          </label>
+          ${p.needsDecon ? '<div class="merge-note"><i class="fa-solid fa-triangle-exclamation"></i> Existing buildings must be deconstructed before merging.</div>' : ''}
+        </div>
+      `;
+    };
+
+    const items = proposals.map((p, idx) => p.type === 'group' ? renderGroup(p, idx) : renderExpand(p, idx)).join('');
 
     body.innerHTML = `
-      <p>These adjacent parcels can be merged into one larger block:</p>
-      <ul class="merge-parcel-list">${listItems}</ul>
-      <div class="summary-row">
-        <span>Combined area:</span>
-        <strong>${totalArea.toLocaleString()} m²</strong>
-      </div>
-      <div class="summary-row">
-        <span>Combined value:</span>
-        <strong>$${combinedValue.toLocaleString()}</strong>
-      </div>
-      ${hasBuildings(cadids) ? '<div class="merge-note"><i class="fa-solid fa-triangle-exclamation"></i> Existing buildings must be deconstructed before merging.</div>' : ''}
+      <p>The following adjacent parcels can be merged into larger blocks. Select the ones you want to merge:</p>
+      <div class="merge-proposals-list">${items}</div>
     `;
 
-    document.getElementById('btn-confirm-merge').innerHTML = '<i class="fa-solid fa-object-group"></i> Merge Parcels';
+    document.getElementById('btn-confirm-merge').innerHTML = '<i class="fa-solid fa-object-group"></i> Merge Selected';
     modal.style.display = 'flex';
   }
 
@@ -411,26 +489,42 @@
     saveGame();
     updatePendingDeconLayer();
     showToast('Deconstructing buildings before merge…', 'warning');
-    openDeconstructModal(pending);
   }
 
-  function openDeconstructModal(pending) {
+  function openDeconstructModal() {
     const modal = document.getElementById('deconstruct-modal');
     const body = document.getElementById('deconstruct-modal-body');
+    const progressList = document.getElementById('deconstruct-progress-list');
 
-    const lotList = pending.cadids.map(cid => {
-      const feat = currentLoadedFeatures.find(f => parseInt(f.properties.cadid) === cid);
-      if (feat) return `Lot ${feat.properties.lotnumber} (${feat.properties.planlabel})`;
-      const parcel = gameState.ownedParcels[cid];
-      if (parcel) return `Lot ${parcel.lotnumber} (${parcel.planlabel})`;
-      return `Parcel ${cid}`;
-    }).join(', ');
+    const decons = gameState.pendingMergers.filter(m => m.status === 'deconstructing');
+    if (decons.length === 0) {
+      modal.style.display = 'none';
+      return;
+    }
 
-    body.innerHTML = `
-      <p>Deconstructing buildings on ${pending.cadids.length} parcel(s) before they can be merged. You can close this and keep playing.</p>
-      <p style="margin-top:8px; color: var(--warning); font-size: 12px;"><strong>${lotList}</strong></p>
-    `;
+    body.innerHTML = `<p>Deconstructing buildings before merges. You can close this and keep playing.</p>`;
+
+    progressList.innerHTML = decons.map((d, idx) => {
+      const lotList = d.cadids.map(cid => {
+        const feat = currentLoadedFeatures.find(f => parseInt(f.properties.cadid) === cid);
+        if (feat) return `Lot ${feat.properties.lotnumber} (${feat.properties.planlabel})`;
+        const parcel = gameState.ownedParcels[cid];
+        if (parcel) return `Lot ${parcel.lotnumber} (${parcel.planlabel})`;
+        return `Parcel ${cid}`;
+      }).join(', ');
+      return `
+        <div class="deconstruct-item" data-decon-id="${d.id}">
+          <div style="font-size:12px; color:var(--warning); margin-bottom:4px;">${lotList}</div>
+          <div class="progress-bar">
+            <div class="progress-fill deconstruct-progress" data-decon-id="${d.id}" style="width:0%"></div>
+          </div>
+          <div class="construction-time deconstruct-time" data-decon-id="${d.id}"></div>
+        </div>
+      `;
+    }).join('');
+
     modal.style.display = 'block';
+    decons.forEach(updateDeconstructProgress);
   }
 
   function closeDeconstructModal() {
@@ -471,8 +565,8 @@
   }
 
   function updateDeconstructProgress(pending) {
-    const bar = document.getElementById('deconstruct-progress');
-    const timeEl = document.getElementById('deconstruct-time');
+    const bar = document.querySelector(`.deconstruct-progress[data-decon-id="${pending.id}"]`);
+    const timeEl = document.querySelector(`.deconstruct-time[data-decon-id="${pending.id}"]`);
     if (!bar || !timeEl) return;
 
     const total = pending.deconstruction.completeAt - pending.deconstruction.startedAt;
@@ -506,33 +600,6 @@
     return null;
   }
 
-  function showBlockExpansionProposal(block, parcelFeature) {
-    const parcelCadid = parseInt(parcelFeature.properties.cadid);
-    currentMergeCadids = null;
-    currentExpandBlock = block;
-    currentExpandParcelCadid = parcelCadid;
-
-    const modal = document.getElementById('merge-modal');
-    const body = document.getElementById('merge-modal-body');
-    const parcel = gameState.ownedParcels[parcelCadid];
-
-    body.innerHTML = `
-      <p>This parcel is adjacent to an existing block. Merge it into the block?</p>
-      <ul class="merge-parcel-list">
-        <li><strong>${block.label}</strong> — ${block.area.toLocaleString()} m², ${block.cadids.length} lots</li>
-        <li><strong>Lot ${parcelFeature.properties.lotnumber}</strong> (${parcelFeature.properties.planlabel}) — ${parcelFeature.properties.area?.toLocaleString()} m² ${parcel && parcel.development && parcel.development.floors.length ? `• ${parcel.development.floors.length} floors` : ''}</li>
-      </ul>
-      <div class="summary-row">
-        <span>New combined area:</span>
-        <strong>${(block.area + parcelFeature.properties.area).toLocaleString()} m²</strong>
-      </div>
-      ${hasBuildings([parcelCadid]) || (block.development && block.development.floors.length > 0) ? '<div class="merge-note"><i class="fa-solid fa-triangle-exclamation"></i> Existing buildings must be deconstructed before merging.</div>' : ''}
-    `;
-
-    document.getElementById('btn-confirm-merge').innerHTML = '<i class="fa-solid fa-object-group"></i> Merge into Block';
-    modal.style.display = 'flex';
-  }
-
   function startBlockExpansionDeconstruction(block, parcelCadid) {
     const allTargets = [...block.cadids, parcelCadid];
     const time = deconstructionTimeForGroup(allTargets);
@@ -561,12 +628,25 @@
     saveGame();
     updatePendingDeconLayer();
     showToast('Deconstructing buildings before block expansion…', 'warning');
-    openDeconstructModal(pending);
   }
 
   function expandBlockWithCadid(block, parcelCadid) {
     const parcel = gameState.ownedParcels[parcelCadid];
     if (!parcel || !block) return;
+
+    const parcelFeature = currentLoadedFeatures.find(f => parseInt(f.properties.cadid) === parcelCadid);
+    if (parcelFeature) {
+      block.memberGeometries[parcelCadid] = parcelFeature.geometry;
+    }
+
+    // Recompute the block outline from all member geometries so sequential
+    // expansions don't accumulate turf union artefacts.
+    const allMemberFeatures = block.cadids.map(cid => {
+      const geom = block.memberGeometries[cid];
+      return geom ? { geometry: geom } : null;
+    }).filter(Boolean);
+    if (parcelFeature) allMemberFeatures.push(parcelFeature);
+    block.geometry = unionFeatureGeometries(allMemberFeatures);
 
     block.originalParcels[parcelCadid] = JSON.parse(JSON.stringify(parcel));
     block.cadids.push(parcelCadid);
@@ -587,9 +667,17 @@
     return document.getElementById('merge-modal').style.display === 'flex';
   }
 
+  function proposalCadids(p) {
+    return p.type === 'group' ? p.cadids : [...p.block.cadids, p.parcelCadid];
+  }
+
   function checkForMergeOpportunities() {
     if (isMergeModalOpen()) return;
-    // First check standalone parcel groups
+
+    const proposals = [];
+    const usedCadids = new Set();
+
+    // First collect standalone parcel groups that can form a new block
     const groups = findAdjacentOwnedParcelGroups();
     for (const group of groups) {
       const cadids = group.map(f => parseInt(f.properties.cadid));
@@ -600,49 +688,148 @@
       if (getPendingMergeForGroup(cadids)) continue;
       // Skip if the player has dismissed this merge
       if (isMergeDismissed(cadids)) continue;
-      // Show proposal for the first eligible group
-      showMergeProposalModal(group);
-      return;
+
+      cadids.forEach(id => usedCadids.add(id));
+      proposals.push({
+        type: 'group',
+        cadids,
+        features: group,
+        needsDecon: hasBuildings(cadids)
+      });
     }
 
-    // Then check if any standalone parcel can expand an existing block
+    // Then collect standalone parcels that can expand an existing block
     const expansion = findStandaloneParcelAdjacentToBlock();
     if (expansion) {
-      const expandKey = `expand:${expansion.block.id}:${expansion.parcelCadid}`;
-      const alreadyPending = gameState.pendingMergers.some(m => m.targetBlockId === expansion.block.id && m.cadids.includes(expansion.parcelCadid));
-      const alreadyDismissed = gameState.dismissedMergeKeys.includes(expandKey);
-      if (!alreadyPending && !alreadyDismissed) {
-        showBlockExpansionProposal(expansion.block, expansion.parcelFeature);
+      const expandCadids = [...expansion.block.cadids, expansion.parcelCadid];
+      // Skip if any parcel in this expansion is already used by a group proposal
+      if (!expandCadids.some(id => usedCadids.has(id))) {
+        const expandKey = `expand:${expansion.block.id}:${expansion.parcelCadid}`;
+        const alreadyPending = gameState.pendingMergers.some(m => m.targetBlockId === expansion.block.id && m.cadids.includes(expansion.parcelCadid));
+        const alreadyDismissed = gameState.dismissedMergeKeys.includes(expandKey);
+        if (!alreadyPending && !alreadyDismissed) {
+          proposals.push({
+            type: 'expand',
+            block: expansion.block,
+            parcelCadid: expansion.parcelCadid,
+            parcelFeature: expansion.parcelFeature,
+            cadids: expandCadids,
+            needsDecon: hasBuildings([expansion.parcelCadid]) || (expansion.block.development && expansion.block.development.floors.length > 0)
+          });
+        }
       }
+    }
+
+    if (proposals.length > 0) {
+      showMergeProposalsModal(proposals);
+    }
+  }
+
+  function truncateGeometry(geometry, precision = 6) {
+    return turf.truncate(turf.feature(geometry), { precision, coordinates: 2 }).geometry;
+  }
+
+  function cleanGeometryFeature(feature) {
+    if (!feature || !feature.geometry) return null;
+    if (typeof turf.cleanCoords === 'function') {
+      try {
+        feature = turf.cleanCoords(feature);
+      } catch (e) {
+        // ignore clean failure
+      }
+    }
+    return feature.geometry;
+  }
+
+  function logGeometry(prefix, geometry) {
+    if (!geometry) return;
+    const type = geometry.type;
+    let parts = 1;
+    if (type === 'MultiPolygon') parts = geometry.coordinates.length;
+    if (type === 'Polygon') parts = geometry.coordinates.length; // includes holes
+    console.log(`${prefix}: ${type} (${parts} part${parts === 1 ? '' : 's'})`);
+  }
+
+  function unionFeatureGeometries(features) {
+    if (features.length === 0) return null;
+    if (features.length === 1) return truncateGeometry(features[0].geometry);
+
+    // Snap all coordinates to a common grid first.
+    const snapped = features.map(f => turf.feature(truncateGeometry(f.geometry), { dissolve: 1 }));
+
+    try {
+      // turf.dissolve is designed to merge adjacent polygons and usually handles
+      // shared edges with mismatched vertices better than iterative union.
+      if (typeof turf.dissolve === 'function') {
+        const dissolved = turf.dissolve(turf.featureCollection(snapped), { propertyName: 'dissolve' });
+        if (dissolved && dissolved.features && dissolved.features.length > 0) {
+          if (dissolved.features.length === 1) {
+            const geom = cleanGeometryFeature(dissolved.features[0]);
+            logGeometry('unionFeatureGeometries (dissolve)', geom);
+            return geom;
+          }
+          // If dissolve still produced multiple parts, they are probably separated
+          // by tiny gaps. Buffer them together slightly and unbuffer to close gaps.
+          const combined = turf.combine(dissolved);
+          const buffered = turf.buffer(combined, 0.5, { units: 'meters' });
+          const closed = turf.buffer(buffered, -0.5, { units: 'meters' });
+          const geom = cleanGeometryFeature(closed);
+          logGeometry('unionFeatureGeometries (buffered)', geom);
+          return geom;
+        }
+      }
+    } catch (e) {
+      console.warn('Dissolve failed, falling back to iterative union', e);
+    }
+
+    try {
+      let union = snapped[0];
+      for (let i = 1; i < snapped.length; i++) {
+        union = turf.union(union, snapped[i]);
+      }
+      const geom = cleanGeometryFeature(union);
+      logGeometry('unionFeatureGeometries (iterative)', geom);
+      return geom;
+    } catch (e) {
+      console.warn('Union failed', e);
+      return null;
     }
   }
 
   function getBlockUnionGeoJSON() {
     const features = Object.values(gameState.ownedBlocks).map(block => {
-      const memberFeatures = currentLoadedFeatures.filter(f => block.cadids.includes(parseInt(f.properties.cadid)));
-      if (memberFeatures.length === 0) return null;
+      // Use the cached dissolved outline; it is recomputed from all member
+      // geometries whenever the block is created or expanded so sequential
+      // merges don't accumulate turf union artefacts.
+      let geometry = block.geometry;
 
-      try {
-        let union = memberFeatures[0].geometry;
-        for (let i = 1; i < memberFeatures.length; i++) {
-          union = turf.union(union, memberFeatures[i].geometry);
-        }
-        return {
-          type: 'Feature',
-          id: block.id,
-          properties: {
-            blockId: block.id,
-            area: block.area,
-            price: block.price,
-            label: block.label,
-            cadids: block.cadids
-          },
-          geometry: union
-        };
-      } catch (e) {
-        console.warn('Block union failed', e);
-        return null;
+      if (!geometry && block.memberGeometries) {
+        const allMemberFeatures = block.cadids.map(cid => {
+          const geom = block.memberGeometries[cid];
+          return geom ? { geometry: geom } : null;
+        }).filter(Boolean);
+        geometry = unionFeatureGeometries(allMemberFeatures);
       }
+
+      if (!geometry) {
+        const memberFeatures = currentLoadedFeatures.filter(f => block.cadids.includes(parseInt(f.properties.cadid)));
+        geometry = unionFeatureGeometries(memberFeatures);
+      }
+
+      if (!geometry) return null;
+      logGeometry(`getBlockUnionGeoJSON block ${block.id}`, geometry);
+      return {
+        type: 'Feature',
+        id: block.id,
+        properties: {
+          blockId: block.id,
+          area: block.area,
+          price: block.price,
+          label: block.label,
+          cadids: block.cadids
+        },
+        geometry: geometry
+      };
     }).filter(Boolean);
 
     return { type: 'FeatureCollection', features };
@@ -655,6 +842,22 @@
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
         generateId: true
+      });
+    }
+
+    if (!map.getLayer('block-fill')) {
+      map.addLayer({
+        id: 'block-fill',
+        type: 'fill',
+        source: 'player-blocks',
+        paint: {
+          'fill-color': '#10b981',
+          'fill-opacity': [
+            'case',
+            ['boolean', ['feature-state', 'hover'], false], 0.92,
+            0.78
+          ]
+        }
       });
     }
 
@@ -761,35 +964,48 @@
     if (blockListenersAdded) return;
     blockListenersAdded = true;
 
-    // Block hover interactions
-    map.on('mousemove', 'block-outline', (e) => {
-      if (e.features.length > 0) {
-        map.getCanvas().style.cursor = 'pointer';
-        if (hoveredBlockId !== null) {
-          map.setFeatureState({ source: 'player-blocks', id: hoveredBlockId }, { hover: false });
-        }
-        hoveredBlockId = parseInt(e.features[0].properties.blockId);
-        map.setFeatureState({ source: 'player-blocks', id: hoveredBlockId }, { hover: true });
+    function highlightBlock(feature) {
+      map.getCanvas().style.cursor = 'pointer';
+      if (hoveredBlockId !== null) {
+        map.setFeatureState({ source: 'player-blocks', id: hoveredBlockId }, { hover: false });
       }
-    });
+      hoveredBlockId = parseInt(feature.properties.blockId);
+      map.setFeatureState({ source: 'player-blocks', id: hoveredBlockId }, { hover: true });
+    }
 
-    map.on('mouseleave', 'block-outline', () => {
+    function clearBlockHover() {
       map.getCanvas().style.cursor = '';
       if (hoveredBlockId !== null) {
         map.setFeatureState({ source: 'player-blocks', id: hoveredBlockId }, { hover: false });
         hoveredBlockId = null;
       }
+    }
+
+    function clickBlock(feature) {
+      playSound('click');
+      const blockId = parseInt(feature.properties.blockId);
+      const block = getBlockById(blockId);
+      if (!block) return;
+      const feat = currentLoadedFeatures.find(f => block.cadids.includes(parseInt(f.properties.cadid)));
+      if (feat) onParcelClicked(feat);
+    }
+
+    // Block hover interactions (outline and fill)
+    map.on('mousemove', 'block-outline', (e) => {
+      if (e.features.length > 0) highlightBlock(e.features[0]);
+    });
+    map.on('mousemove', 'block-fill', (e) => {
+      if (e.features.length > 0) highlightBlock(e.features[0]);
     });
 
+    map.on('mouseleave', 'block-outline', clearBlockHover);
+    map.on('mouseleave', 'block-fill', clearBlockHover);
+
     map.on('click', 'block-outline', (e) => {
-      if (e.features.length > 0) {
-        playSound('click');
-        const blockId = parseInt(e.features[0].properties.blockId);
-        const block = getBlockById(blockId);
-        if (!block) return;
-        const feat = currentLoadedFeatures.find(f => block.cadids.includes(parseInt(f.properties.cadid)));
-        if (feat) onParcelClicked(feat);
-      }
+      if (e.features.length > 0) clickBlock(e.features[0]);
+    });
+    map.on('click', 'block-fill', (e) => {
+      if (e.features.length > 0) clickBlock(e.features[0]);
     });
   }
 
@@ -846,9 +1062,7 @@
   let selectedBlock = null;
   let selectedBlockId = null;
   let currentSplitBlock = null;
-  let currentMergeCadids = null;
-  let currentExpandBlock = null;
-  let currentExpandParcelCadid = null;
+  let currentMergeProposals = []; // { type:'group'|'expand', cadids:[], features?:[], block?, parcelCadid?, parcelFeature?, needsDecon:bool }
   let hoveredParcelId = null;
   let hoveredBlockId = null;
   let debounceTimer = null;
@@ -1042,11 +1256,15 @@
               '#00f0ff'            // Cyan for unclaimed
             ],
             'fill-opacity': [
-              'match',
-              ['get', 'status'],
-              'player', 0.65,
-              'rival', 0.50,
-              0.22
+              'case',
+              ['boolean', ['get', 'inBlock'], false], 0,
+              [
+                'match',
+                ['get', 'status'],
+                'player', 0.65,
+                'rival', 0.50,
+                0.22
+              ]
             ]
           }
         });
@@ -1070,6 +1288,7 @@
           id: 'cadastre-line',
           type: 'line',
           source: 'nsw-cadastre',
+          filter: ['!=', ['get', 'inBlock'], true],
           paint: {
             'line-color': [
               'match',
@@ -1079,15 +1298,11 @@
               '#00a6ff'
             ],
             'line-width': [
-              'case',
-              ['boolean', ['get', 'inBlock'], false], 0,
-              [
-                'match',
-                ['get', 'status'],
-                'player', 3,
-                'rival', 2,
-                1.5
-              ]
+              'match',
+              ['get', 'status'],
+              'player', 3,
+              'rival', 2,
+              1.5
             ],
             'line-opacity': 0.95
           }
@@ -1099,6 +1314,7 @@
           id: 'cadastre-hover',
           type: 'line',
           source: 'nsw-cadastre',
+          filter: ['!=', ['get', 'inBlock'], true],
           paint: {
             'line-color': '#f59e0b',
             'line-width': 4,
@@ -2166,39 +2382,49 @@
 
     // Merge modal actions
     document.getElementById('btn-confirm-merge').addEventListener('click', () => {
-      document.getElementById('merge-modal').style.display = 'none';
-      if (currentMergeCadids) {
-        if (hasBuildings(currentMergeCadids)) {
-          startMergeDeconstruction(currentMergeCadids);
-        } else {
-          createBlockFromCadids(currentMergeCadids);
+      const modal = document.getElementById('merge-modal');
+      const checkedIndexes = Array.from(modal.querySelectorAll('.merge-proposal-check:checked')).map(cb => parseInt(cb.dataset.index, 10));
+      modal.style.display = 'none';
+
+      let anyDecon = false;
+      checkedIndexes.forEach(idx => {
+        const p = currentMergeProposals[idx];
+        if (!p) return;
+        if (p.type === 'group') {
+          if (p.needsDecon) {
+            startMergeDeconstruction(p.cadids);
+            anyDecon = true;
+          } else {
+            createBlockFromCadids(p.cadids);
+          }
+        } else if (p.type === 'expand') {
+          if (p.needsDecon) {
+            startBlockExpansionDeconstruction(p.block, p.parcelCadid);
+            anyDecon = true;
+          } else {
+            expandBlockWithCadid(p.block, p.parcelCadid);
+          }
         }
-        currentMergeCadids = null;
-      } else if (currentExpandBlock && currentExpandParcelCadid !== null) {
-        const needsDecon = hasBuildings([currentExpandParcelCadid]) || (currentExpandBlock.development && currentExpandBlock.development.floors.length > 0);
-        if (needsDecon) {
-          startBlockExpansionDeconstruction(currentExpandBlock, currentExpandParcelCadid);
-        } else {
-          expandBlockWithCadid(currentExpandBlock, currentExpandParcelCadid);
-        }
-        currentExpandBlock = null;
-        currentExpandParcelCadid = null;
-      }
+      });
+
+      if (anyDecon) openDeconstructModal();
+      currentMergeProposals = [];
     });
     document.getElementById('btn-decline-merge').addEventListener('click', () => {
       document.getElementById('merge-modal').style.display = 'none';
-      if (currentMergeCadids) {
-        dismissMerge(currentMergeCadids);
-        currentMergeCadids = null;
-      } else if (currentExpandBlock && currentExpandParcelCadid !== null) {
-        const expandKey = `expand:${currentExpandBlock.id}:${currentExpandParcelCadid}`;
-        if (!gameState.dismissedMergeKeys.includes(expandKey)) {
-          gameState.dismissedMergeKeys.push(expandKey);
-          saveGame();
+      // Dismiss all proposals shown so they don't immediately reappear
+      currentMergeProposals.forEach(p => {
+        if (p.type === 'group') {
+          dismissMerge(p.cadids);
+        } else if (p.type === 'expand') {
+          const expandKey = `expand:${p.block.id}:${p.parcelCadid}`;
+          if (!gameState.dismissedMergeKeys.includes(expandKey)) {
+            gameState.dismissedMergeKeys.push(expandKey);
+          }
         }
-        currentExpandBlock = null;
-        currentExpandParcelCadid = null;
-      }
+      });
+      saveGame();
+      currentMergeProposals = [];
     });
 
     // Split modal actions
@@ -2322,7 +2548,7 @@
 
     // Resume any in-progress deconstruction UI
     if (gameState.pendingMergers.length > 0) {
-      openDeconstructModal(gameState.pendingMergers[0]);
+      openDeconstructModal();
     }
 
     // Start 1-second game tick: construction, mergers, then income
