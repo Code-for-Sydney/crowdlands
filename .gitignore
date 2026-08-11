@@ -1,1 +1,5 @@
 node_modules
+app.js.bak
+*.log
+.DS_Store
+coverage/
