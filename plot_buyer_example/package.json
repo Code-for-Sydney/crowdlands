@@ -5,9 +5,24 @@
   "main": "app.js",
   "scripts": {
     "start": "npx -y serve -l 3000 .",
-    "dev": "npx -y serve -l 3000 ."
+    "dev": "npx -y serve -l 3000 .",
+    "test": "jest"
   },
   "dependencies": {
     "maplibre-gl": "^3.6.0"
+  },
+  "devDependencies": {
+    "@turf/buffer": "^6.5.0",
+    "@turf/clean-coords": "^6.5.0",
+    "@turf/combine": "^6.5.0",
+    "@turf/dissolve": "^6.5.0",
+    "@turf/helpers": "^6.5.0",
+    "@turf/intersect": "^6.5.0",
+    "@turf/line-overlap": "^6.5.0",
+    "@turf/truncate": "^6.5.0",
+    "@turf/turf": "^6.5.0",
+    "@turf/union": "^6.5.0",
+    "jest": "^30.4.2",
+    "jest-environment-jsdom": "^30.4.1"
   }
 }

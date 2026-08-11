@@ -193,16 +193,14 @@
     // Robust fallback: if bounding boxes don't overlap, they can't share an edge.
     if (!bboxOverlap(coordsA, coordsB)) return false;
 
-    // Two parcels are adjacent when their intersection is a line segment
-    // (not just a corner point and not an overlap). This handles shared edges
-    // that have different intermediate vertices.
+    // Two parcels are adjacent when their boundaries share a line segment.
+    // turf.lineOverlap handles shared edges that have different intermediate
+    // vertices, which the exact-edge check above misses.
     try {
-      const polyA = turf.polygon(coordsA);
-      const polyB = turf.polygon(coordsB);
-      const intersection = turf.intersect(polyA, polyB);
-      if (!intersection || !intersection.geometry) return false;
-      const type = intersection.geometry.type;
-      return type === 'LineString' || type === 'MultiLineString';
+      const lineA = turf.lineString(coordsA[0]);
+      const lineB = turf.lineString(coordsB[0]);
+      const overlap = turf.lineOverlap(lineA, lineB);
+      return overlap && overlap.features && overlap.features.length > 0;
     } catch (e) {
       return false;
     }
@@ -242,6 +240,8 @@
     for (const feat of features) {
       const cid = parseInt(feat.properties.cadid);
       if (visited.has(cid)) continue;
+      // Only standalone parcels can form a new block.
+      if (isCadidInBlock(cid)) continue;
       const group = [feat];
       const queue = [feat];
       visited.add(cid);
@@ -251,6 +251,8 @@
         for (const other of features) {
           const otherId = parseInt(other.properties.cadid);
           if (visited.has(otherId)) continue;
+          // Only grow through other standalone parcels.
+          if (isCadidInBlock(otherId)) continue;
           if (polygonsShareEdge(current.geometry.coordinates, other.geometry.coordinates)) {
             visited.add(otherId);
             group.push(other);
@@ -2605,5 +2607,122 @@
     // Start 15-second rival market AI tick
     setInterval(rivalMarketTick, 15000);
   });
+
+  // Expose key internals for testing and debugging.
+  window.CL = {
+    state: gameState,
+    saveGame,
+    migrateSave,
+    config: { FLOOR_TYPES, DEVELOPMENT_TEMPLATES, BASEMAPS },
+    utils: {
+      formatMs,
+      calculateDevelopmentYield,
+      getDevelopmentCost,
+      getDevelopmentBuildTime,
+      calculateParcelPrice,
+      calculateParcelYield
+    },
+    blocks: {
+      getPlayerOwnedCadids,
+      isCadidInBlock,
+      getBlockForCadid,
+      getBlockById,
+      getOwnerStatusForCadid,
+      bboxOverlap,
+      polygonsShareEdge,
+      edgeKey,
+      getMergeKey,
+      isMergeDismissed,
+      dismissMerge,
+      clearDismissedMergesForCadid,
+      findAdjacentOwnedParcelGroups,
+      getPendingMergeForGroup,
+      hasBuildings,
+      deconstructionTimeForGroup,
+      generateBlockId,
+      createBlockFromCadids,
+      dissolveBlock,
+      calculateBlockYield,
+      isBlockWaterfront,
+      startMergeDeconstruction,
+      openDeconstructModal,
+      closeDeconstructModal,
+      processPendingMergers,
+      updateDeconstructProgress,
+      findStandaloneParcelAdjacentToBlock,
+      startBlockExpansionDeconstruction,
+      expandBlockWithCadid,
+      isMergeModalOpen,
+      proposalCadids,
+      checkForMergeOpportunities,
+      truncateGeometry,
+      cleanGeometryFeature,
+      logGeometry,
+      unionFeatureGeometries,
+      getBlockUnionGeoJSON,
+      get currentMergeProposals() { return currentMergeProposals; },
+      set currentMergeProposals(value) { currentMergeProposals = value; }
+    },
+    map: {
+      initMap,
+      updateCadastreLayer,
+      esriToGeoJSON,
+      applyFeatureOwnershipStates,
+      updatePriceHeatmap,
+      togglePriceHeatmap,
+      checkZoomLevel,
+      initBlockLayers,
+      updateBlockLayer,
+      clearBlockSelection,
+      setBlockSelection,
+      clearParcelSelection,
+      setParcelSelection,
+      updatePendingDeconLayer,
+      get currentLoadedFeatures() { return currentLoadedFeatures; },
+      set currentLoadedFeatures(value) { currentLoadedFeatures = value; }
+    },
+    development: {
+      onParcelClicked,
+      getSelectedDevelopment,
+      getSelectedProperty,
+      startPlanning,
+      addFloor,
+      removeFloor,
+      toggleFloor,
+      startConstructionFromPlan,
+      cancelPlanning,
+      renderDevelopmentSection,
+      renderPlanner,
+      renderFloorStack,
+      renderPlannerSummary,
+      updateConstructionProgress,
+      openSplitModal,
+      // Test helpers
+      _selectParcelByCadid: (cadid) => { selectedParcel = gameState.ownedParcels[cadid] || null; selectedParcelId = cadid; selectedBlock = null; selectedBlockId = null; },
+      _selectBlockById: (id) => { selectedBlock = gameState.ownedBlocks[id] || null; selectedBlockId = id; selectedParcel = null; selectedParcelId = null; },
+      _clearSelection: () => { selectedParcel = null; selectedParcelId = null; selectedBlock = null; selectedBlockId = null; }
+    },
+    economy: {
+      buySelectedParcel,
+      sellSelectedParcel,
+      processConstruction,
+      gameIncomeTick,
+      rivalMarketTick,
+      updateHUD
+    },
+    ui: {
+      renderPortfolio,
+      renderLeaderboard,
+      setupSearch,
+      setupUIEventListeners
+    },
+    audio: {
+      initAudioContext,
+      playSound,
+      showToast,
+      get audioCtx() { return audioCtx; },
+      set audioCtx(value) { audioCtx = value; }
+    }
+  };
 
 })();
