@@ -87,14 +87,28 @@ const htmlSource = fs.readFileSync(htmlPath, 'utf8');
 const htmlWithoutScripts = htmlSource.replace(/<script[^>]*>.*?<\/script>/gs, '');
 document.body.innerHTML = htmlWithoutScripts;
 
-// Load the application source.
-const appPath = path.join(__dirname, '..', 'app.js');
-const appSource = fs.readFileSync(appPath, 'utf8');
+// Load the split application scripts in dependency order.
+const scripts = [
+  'js/state.js',
+  'js/config.js',
+  'js/utils.js',
+  'js/blocks.js',
+  'js/audio.js',
+  'js/toast.js',
+  'js/map.js',
+  'js/development.js',
+  'js/economy.js',
+  'js/ui.js',
+  'js/app.js'
+];
 
-// Execute the IIFE in the jsdom global context.
-const script = document.createElement('script');
-script.textContent = appSource;
-document.head.appendChild(script);
+for (const src of scripts) {
+  const scriptPath = path.join(__dirname, '..', src);
+  const scriptSource = fs.readFileSync(scriptPath, 'utf8');
+  const script = document.createElement('script');
+  script.textContent = scriptSource;
+  document.head.appendChild(script);
+}
 
 // Provide a helper to reset game state between tests.
 global.resetGameState = () => {

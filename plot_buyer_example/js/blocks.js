@@ -70,16 +70,14 @@
     // Robust fallback: if bounding boxes don't overlap, they can't share an edge.
     if (!bboxOverlap(coordsA, coordsB)) return false;
 
-    // Two parcels are adjacent when their intersection is a line segment
-    // (not just a corner point and not an overlap). This handles shared edges
-    // that have different intermediate vertices.
+    // Two parcels are adjacent when their boundaries share a line segment.
+    // turf.lineOverlap handles shared edges that have different intermediate
+    // vertices, which the exact-edge check above misses.
     try {
-      const polyA = turf.polygon(coordsA);
-      const polyB = turf.polygon(coordsB);
-      const intersection = turf.intersect(polyA, polyB);
-      if (!intersection || !intersection.geometry) return false;
-      const type = intersection.geometry.type;
-      return type === 'LineString' || type === 'MultiLineString';
+      const lineA = turf.lineString(coordsA[0]);
+      const lineB = turf.lineString(coordsB[0]);
+      const overlap = turf.lineOverlap(lineA, lineB);
+      return overlap && overlap.features && overlap.features.length > 0;
     } catch (e) {
       return false;
     }
@@ -119,6 +117,8 @@
     for (const feat of features) {
       const cid = parseInt(feat.properties.cadid);
       if (visited.has(cid)) continue;
+      // Only standalone parcels can form a new block.
+      if (isCadidInBlock(cid)) continue;
       const group = [feat];
       const queue = [feat];
       visited.add(cid);
@@ -128,6 +128,8 @@
         for (const other of features) {
           const otherId = parseInt(other.properties.cadid);
           if (visited.has(otherId)) continue;
+          // Only grow through other standalone parcels.
+          if (isCadidInBlock(otherId)) continue;
           if (polygonsShareEdge(current.geometry.coordinates, other.geometry.coordinates)) {
             visited.add(otherId);
             group.push(other);
@@ -963,36 +965,5 @@
   let basemapIndex = 0;
   let heatmapActive = false;
 
-  const BASEMAPS = [
-    {
-      name: 'Dark Matter',
-      style: {
-        version: 8,
-        sources: {
-          'carto-dark': {
-            type: 'raster',
-            tiles: ['https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}.png'],
-            tileSize: 256,
-            attribution: '&copy; CartoDB &copy; OpenStreetMap'
-          }
-        },
-        layers: [{ id: 'carto-dark-layer', type: 'raster', source: 'carto-dark' }]
-      }
-    },
-    {
-      name: 'OpenStreetMap',
-      style: {
-        version: 8,
-        sources: {
-          'osm': {
-            type: 'raster',
-            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-            tileSize: 256,
-            attribution: '&copy; OpenStreetMap contributors'
-          }
-        },
-        layers: [{ id: 'osm-layer', type: 'raster', source: 'osm' }]
-      }
-    }
-  ];
+
 
